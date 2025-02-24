@@ -10,33 +10,36 @@ function Chat({ token, privateKey }) {
     const [recipient, setRecipient] = useState(null);
     const [selectedGroup, setSelectedGroup] = useState(null);
     const [groups, setGroups] = useState([]);
-    const [currentUserId, setCurrentUserId] = useState(null); // Store user ID from server
+    const [currentUserId, setCurrentUserId] = useState(null);
     const socket = useRef(null);
 
-    const decryptMessage = (encryptedContent, isPrivate = false, senderId, currentUserId) => {
-        if (!isPrivate || !privateKey || !encryptedContent) {
-            console.log('No decryption needed:', encryptedContent);
-            return encryptedContent;
+    const decryptMessage = (encryptedContent, plaintextContent, isPrivate, senderId, currentUserId) => {
+        if (!isPrivate) {
+            console.log('Group message, using plaintext:', plaintextContent);
+            return plaintextContent;
         }
 
-        // Skip decryption if the message is from the current user (plaintext)
         if (senderId === currentUserId) {
-            console.log('Skipping decryption for own message:', encryptedContent);
-            return encryptedContent;
+            console.log('Sender’s message, using plaintext:', plaintextContent);
+            return plaintextContent; // Sender sees their own plaintext
         }
 
-        console.log('Attempting to decrypt content:', encryptedContent);
-        console.log('Using private key:', privateKey.substring(0, 50) + '...');
+        if (!privateKey || !encryptedContent) {
+            console.log('No decryption possible:', encryptedContent);
+            return encryptedContent || plaintextContent;
+        }
+
+        console.log('Decrypting recipient message:', encryptedContent);
         try {
             const privateKeyObj = forge.pki.privateKeyFromPem(privateKey);
             const encryptedBytes = forge.util.decode64(encryptedContent);
             const decrypted = privateKeyObj.decrypt(encryptedBytes, 'RSA-OAEP');
             const result = forge.util.decodeUtf8(decrypted);
-            console.log('Successfully decrypted content:', result);
+            console.log('Decrypted content:', result);
             return result;
         } catch (error) {
             console.error("Decryption error:", error.message);
-            return "[Failed to decrypt message]";
+            return "[Decryption Failed]";
         }
     };
 
@@ -50,7 +53,6 @@ function Chat({ token, privateKey }) {
                 console.log("Connected to server");
             });
 
-            // Get user ID from server
             socket.current.on("userId", (userId) => {
                 console.log('Current user ID from server:', userId);
                 setCurrentUserId(userId);
@@ -60,10 +62,19 @@ function Chat({ token, privateKey }) {
             socket.current.on("chatMessage", (msg) => {
                 const isPrivate = !!msg.recipient;
                 console.log('Received real-time message:', JSON.stringify(msg));
-                setMessages(prev => [...prev, {
-                    ...msg,
-                    content: decryptMessage(msg.content, isPrivate, msg.sender._id || msg.sender, socket.current.userId),
-                }]);
+                const content = decryptMessage(
+                    msg.encryptedContent,
+                    msg.content, // Server sends 'content' as either plaintext or encrypted
+                    isPrivate,
+                    msg.sender._id || msg.sender,
+                    socket.current.userId
+                );
+
+                setMessages(prev => {
+                    // Deduplicate using tempId or _id
+                    const filtered = prev.filter(m => m.tempId !== msg.tempId && m._id !== msg._id);
+                    return [...filtered, { ...msg, content }];
+                });
             });
 
             socket.current.on("statusUpdate", ({ userId, status }) => {
@@ -75,17 +86,11 @@ function Chat({ token, privateKey }) {
             });
 
             axios.get("http://localhost:3000/api/users", { headers: { Authorization: token } })
-                .then(res => {
-                    console.log('Fetched users:', res.data);
-                    setUsers(res.data);
-                })
+                .then(res => setUsers(res.data))
                 .catch(err => console.error("Error fetching users:", err));
 
             axios.get("http://localhost:3000/api/groups", { headers: { Authorization: token } })
-                .then(res => {
-                    console.log('Fetched groups:', res.data);
-                    setGroups(res.data);
-                })
+                .then(res => setGroups(res.data))
                 .catch(err => console.error("Error fetching groups:", err));
         }
 
@@ -106,10 +111,17 @@ function Chat({ token, privateKey }) {
                         : `http://localhost:3000/api/messages/group/${selectedGroup}`;
                     const res = await axios.get(url, { headers: { Authorization: token } });
                     console.log('Fetched messages:', JSON.stringify(res.data));
-                    setMessages(res.data.map(msg => ({
+                    const decryptedMessages = res.data.map(msg => ({
                         ...msg,
-                        content: decryptMessage(msg.content, !!msg.recipient, msg.sender._id || msg.sender, currentUserId),
-                    })));
+                        content: decryptMessage(
+                            msg.encryptedContent,
+                            msg.content, // Use content from API response
+                            !!msg.recipient,
+                            msg.sender._id || msg.sender,
+                            currentUserId
+                        ),
+                    }));
+                    setMessages(decryptedMessages);
                 } catch (error) {
                     console.error("Error fetching messages:", error);
                 }
@@ -121,34 +133,27 @@ function Chat({ token, privateKey }) {
     const sendMessage = () => {
         if (message.trim() && socket.current) {
             console.log('Sending message:', { recipient, group: selectedGroup, content: message });
+            const tempId = Date.now().toString();
+            const newMessage = {
+                sender: { _id: currentUserId, name: "You" },
+                content: message,
+                recipient: recipient || null,
+                group: selectedGroup || null,
+                tempId,
+            };
 
-            // Append message in plaintext for sender
-            setMessages(prev => [
-                ...prev,
-                {
-                    sender: { _id: currentUserId, name: "You" },
-                    content: message, // Display plaintext for sender
-                    recipient: recipient || null,
-                    group: selectedGroup || null,
-                }
-            ]);
-
-            // Send encrypted message to the server
-            socket.current.emit("chatMessage", { recipient, group: selectedGroup, content: message });
-
-            setMessage(""); // Clear input after sending
+            // Add locally with tempId for optimistic UI update
+            setMessages(prev => [...prev, newMessage]);
+            socket.current.emit("chatMessage", { recipient, group: selectedGroup, content: message, tempId });
+            setMessage("");
         }
     };
-
 
     const createGroup = () => {
         const groupName = prompt("Enter group name:");
         if (groupName) {
             axios.post("http://localhost:3000/api/groups", { name: groupName }, { headers: { Authorization: token } })
-                .then(res => {
-                    console.log('Created group:', res.data);
-                    setGroups([...groups, res.data]);
-                })
+                .then(res => setGroups([...groups, res.data]))
                 .catch(err => console.error("Error creating group:", err));
         }
     };
@@ -188,7 +193,7 @@ function Chat({ token, privateKey }) {
                 </h3>
                 <div style={styles.messages}>
                     {messages.map((msg, i) => (
-                        <div key={i} style={styles.message}>
+                        <div key={msg._id || msg.tempId || i} style={styles.message}>
                             <strong>{msg.sender?.name || "Unknown"}:</strong> {msg.content}
                         </div>
                     ))}
