@@ -1,4 +1,4 @@
-.App {
+/* .App {
   text-align: center;
 }
 
@@ -35,4 +35,92 @@
   to {
     transform: rotate(360deg);
   }
+} */
+
+*{
+  padding: 0px;
+  margin: 0px;
+}
+.container11{
+ 
+  
+  width: 80%;
+  
+  
+  margin: auto;
+}
+.containerup {
+  background-color: aquamarine;
+
+  width: 80%;
+  height: 800px;
+
+  border: 2px solid black;
+  margin: auto;
+}
+form{
+  display: flex;
+  justify-content: space-between;
+  gap: 5px;
+
+}
+form input{
+   flex-basis: 80%;
+}
+.outer{
+  width: 80%;
+  margin: auto;
+  background-color: aqua;
+  color: white;
+  margin-top: 10px;
+  padding-left: 0px;
+}
+.outer ul li{
+  display: flex;
+  justify-content: space-between;
+  cursor: pointer;
+  background-color: blue;
+  margin-top: 10px;
+}
+.outer ul{
+  margin: 0px;
+  padding: 0px;
+}
+.outer ul li span{
+  cursor: pointer;
+}
+.complete{
+  text-decoration: line-through;
+  background-color: aqua;
+  color: black;
+}
+h1{
+  text-align: center;
+}
+.foodcon{
+  background-color: black;
+  width: 100vw;
+    height: 241px;
+}
+.dummmy{
+  display: flex;
+  justify-content: space-between;
+}
+.body{
+  height: 100%;
+}
+.bottomcont{
+  width: 100vw;
+
+  height: max-content;
+  background-color: black;
+}
+.cardscontainer {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  /* ✅ Creates 3 equal columns */
+  gap: 20px;
+  /* ✅ Adds spacing between items */
+  padding: 20px;
+  /* Optional: Adds some space around */
 }

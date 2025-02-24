@@ -1,0 +1,44 @@
+.App {
+    text-align: center;
+}
+
+.chat-container {
+    display: flex;
+    height: 100vh;
+}
+
+.sidebar {
+    width: 30%;
+    border-right: 1px solid #ccc;
+    padding: 10px;
+}
+
+.user {
+    padding: 5px;
+    cursor: pointer;
+}
+
+.user:hover {
+    background-color: #f0f0f0;
+}
+
+.chat {
+    width: 70%;
+    padding: 10px;
+}
+
+.messages {
+    height: 80%;
+    overflow-y: auto;
+    border: 1px solid #ccc;
+    padding: 10px;
+}
+
+input {
+    margin: 5px;
+    padding: 5px;
+}
+
+button {
+    padding: 5px 10px;
+}
