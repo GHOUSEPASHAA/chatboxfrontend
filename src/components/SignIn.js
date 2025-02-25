@@ -7,16 +7,32 @@ function Signup({ setToken, setPrivateKey, setShowSignup }) {
   const [password, setPassword] = useState('');
   const [location, setLocation] = useState('');
   const [designation, setDesignation] = useState('');
+  const [image, setImage] = useState(null); // State for profile image
+
+  const handleImageChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setImage(file);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const res = await axios.post('http://localhost:3000/api/signup', {
-        name,
-        email,
-        password,
-        location,
-        designation,
+      const formData = new FormData();
+      formData.append('name', name);
+      formData.append('email', email);
+      formData.append('password', password);
+      formData.append('location', location);
+      formData.append('designation', designation);
+      if (image) {
+        formData.append('image', image); // Add image to form data
+      }
+
+      const res = await axios.post('http://localhost:3000/api/signup', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data'
+        }
       });
       const { token, privateKey } = res.data;
 
@@ -57,6 +73,12 @@ function Signup({ setToken, setPrivateKey, setShowSignup }) {
           onChange={(e) => setDesignation(e.target.value)}
           placeholder="Designation"
           required
+        />
+        <input
+          type="file"
+          accept="image/*"
+          onChange={handleImageChange}
+          placeholder="Profile Image"
         />
         <button type="submit">Signup</button>
       </form>
