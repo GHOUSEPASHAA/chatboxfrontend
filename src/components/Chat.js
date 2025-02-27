@@ -3,6 +3,14 @@ import io from "socket.io-client";
 import axios from "axios";
 import forge from "node-forge";
 
+// Utility function to safely convert anything to a renderable string
+const safeRender = (value, fallback = "Unknown") => {
+    if (value === null || value === undefined) return fallback;
+    if (typeof value === "string") return value;
+    if (typeof value === "object" && value.name) return value.name; // Handle { _id, name }
+    return JSON.stringify(value); // Fallback for any other object
+};
+
 function Chat({ token, privateKey }) {
     const [users, setUsers] = useState([]);
     const [messages, setMessages] = useState([]);
@@ -12,15 +20,33 @@ function Chat({ token, privateKey }) {
     const [groups, setGroups] = useState([]);
     const [currentUserId, setCurrentUserId] = useState(null);
     const [selectedFile, setSelectedFile] = useState(null);
-    const [selectedUser, setSelectedUser] = useState(null); // For profile display
+    const [selectedUser, setSelectedUser] = useState(null);
     const socket = useRef(null);
     const fileInputRef = useRef(null);
+    const [notifications, setNotifications] = useState([]);
+    const [editingGroupId, setEditingGroupId] = useState(null);
+
+    // Log state changes
+    const setRecipientWithLog = (value) => {
+        console.log(`setRecipient called with: ${value}`);
+        setRecipient(value);
+    };
+
+    const setSelectedGroupWithLog = (value) => {
+        console.log(`setSelectedGroup called with: ${value}`);
+        setSelectedGroup(value);
+    };
+
+    const Notification = ({ message, onClose }) => (
+        <div style={styles.notification}>
+            <div>{safeRender(message)}</div>
+            <button onClick={onClose} style={styles.notificationClose}>Close</button>
+        </div>
+    );
 
     const decryptMessage = (encryptedContent, plaintextContent, isPrivate, senderId, currentUserId) => {
-        if (!isPrivate) return plaintextContent;
-        if (senderId === currentUserId) return plaintextContent;
-        if (!privateKey || !encryptedContent) return encryptedContent || plaintextContent;
-
+        if (!isPrivate || senderId === currentUserId) return safeRender(plaintextContent);
+        if (!privateKey || !encryptedContent) return safeRender(encryptedContent || plaintextContent);
         try {
             const privateKeyObj = forge.pki.privateKeyFromPem(privateKey);
             const encryptedBytes = forge.util.decode64(encryptedContent);
@@ -32,52 +58,69 @@ function Chat({ token, privateKey }) {
         }
     };
 
+    const isGroupAdmin = (groupId) => {
+        if (!groupId || !currentUserId) return false;
+        const group = groups.find(g => g?._id === groupId);
+        if (!group) return false;
+        const creatorId = safeRender(group.creator?._id || group.creator);
+        return creatorId === currentUserId.toString();
+    };
+
+    const canSendInGroup = (groupId) => {
+        const group = groups.find(g => g._id === groupId);
+        if (!group) return false;
+        const creatorId = safeRender(group.creator?._id || group.creator);
+        if (creatorId === currentUserId) return true;
+        const member = group.members.find(m => safeRender(m.userId?._id || m.userId) === currentUserId);
+        return member?.canSendMessages === true;
+    };
+
     useEffect(() => {
         if (token && !socket.current) {
             socket.current = io("http://localhost:3000", {
                 auth: { token },
+                forceNew: true // Ensure unique connection per incognito window
             });
 
-            socket.current.on("connect", () => {
-                console.log("Connected to server");
-            });
-
+            socket.current.on("connect", () => console.log("Connected to server:", socket.current.id));
             socket.current.on("userId", (userId) => {
                 setCurrentUserId(userId);
                 socket.current.userId = userId;
+                console.log("Received userId:", userId);
             });
 
             socket.current.on("chatMessage", (msg) => {
+                console.log("Received chatMessage:", msg);
                 const isPrivate = !!msg.recipient;
-                let content;
+                const content = msg.file ? { type: 'file', ...msg.file } : decryptMessage(
+                    msg.encryptedContent,
+                    msg.content,
+                    isPrivate,
+                    safeRender(msg.sender?._id || msg.sender),
+                    socket.current.userId
+                );
 
-                if (msg.file) {
-                    content = { type: 'file', ...msg.file };
-                } else {
-                    content = decryptMessage(
-                        msg.encryptedContent,
-                        msg.content,
-                        isPrivate,
-                        msg.sender._id || msg.sender,
-                        socket.current.userId
-                    );
-                }
+                console.log("Current context:", { selectedGroup, recipient, currentUserId, msgGroup: msg.group, msgRecipient: msg.recipient });
 
+                // Add all messages to state, filter in UI
                 setMessages(prev => {
                     const filtered = prev.filter(m => m.tempId !== msg.tempId && m._id !== msg._id);
-                    return [...filtered, { ...msg, content }];
+                    const newMessages = [...filtered, { ...msg, content }];
+                    console.log("Updated messages:", newMessages);
+                    return newMessages;
                 });
+
+                if (safeRender(msg.sender?._id || msg.sender) !== currentUserId) {
+                    const senderName = safeRender(msg.sender?.name, "Someone");
+                    const notificationText = msg.file ? `${senderName} sent a file` : `${senderName}: ${safeRender(content)}`;
+                    const notificationId = Date.now();
+                    setNotifications(prev => [...prev, { id: notificationId, text: notificationText }]);
+                    setTimeout(() => setNotifications(prev => prev.filter(n => n.id !== notificationId)), 5000);
+                }
             });
 
-            socket.current.on("statusUpdate", ({ userId, status }) => {
-                setUsers(prev => prev.map(user =>
-                    user._id === userId ? { ...user, status } : user
-                ));
-            });
-
-            socket.current.on("error", (error) => {
-                console.error("Socket error:", error.message);
-            });
+            socket.current.on("error", (error) => console.error("Socket error:", error.message));
+            socket.current.on("disconnect", () => console.log("Disconnected from server"));
 
             axios.get("http://localhost:3000/api/users", { headers: { Authorization: token } })
                 .then(res => setUsers(res.data))
@@ -97,29 +140,36 @@ function Chat({ token, privateKey }) {
     }, [token, privateKey]);
 
     useEffect(() => {
+        if (socket.current && selectedGroup) {
+            console.log("Joining group:", selectedGroup);
+            socket.current.emit("joinGroup", selectedGroup);
+            return () => {
+                console.log("Leaving group:", selectedGroup);
+                socket.current.emit("leaveGroup", selectedGroup);
+            };
+        }
+    }, [selectedGroup]);
+
+    useEffect(() => {
         if (token && (recipient || selectedGroup) && currentUserId) {
+            console.log("Fetching messages for:", { recipient, selectedGroup });
             const fetchMessages = async () => {
                 try {
                     const url = recipient
                         ? `http://localhost:3000/api/messages/private/${recipient}`
                         : `http://localhost:3000/api/messages/group/${selectedGroup}`;
                     const res = await axios.get(url, { headers: { Authorization: token } });
-
-                    const processedMessages = res.data.map(msg => {
-                        if (msg.file) {
-                            return { ...msg, content: { type: 'file', ...msg.file } };
-                        }
-                        return {
-                            ...msg,
-                            content: decryptMessage(
-                                msg.encryptedContent,
-                                msg.content,
-                                !!msg.recipient,
-                                msg.sender._id || msg.sender,
-                                currentUserId
-                            ),
-                        };
-                    });
+                    const processedMessages = res.data.map(msg => ({
+                        ...msg,
+                        content: msg.file ? { type: 'file', ...msg.file } : decryptMessage(
+                            msg.encryptedContent,
+                            msg.content,
+                            !!msg.recipient,
+                            safeRender(msg.sender?._id || msg.sender),
+                            currentUserId
+                        )
+                    }));
+                    console.log("Fetched messages:", processedMessages);
                     setMessages(processedMessages);
                 } catch (error) {
                     console.error("Error fetching messages:", error);
@@ -140,6 +190,14 @@ function Chat({ token, privateKey }) {
     const sendMessage = async () => {
         if (!socket.current || (!message.trim() && !selectedFile)) return;
 
+        if (selectedGroup && !canSendInGroup(selectedGroup)) {
+            setNotifications(prev => [...prev, {
+                id: Date.now(),
+                text: "You don't have permission to send messages in this group"
+            }]);
+            return;
+        }
+
         const tempId = Date.now().toString();
         let newMessage;
 
@@ -151,17 +209,9 @@ function Chat({ token, privateKey }) {
             formData.append('tempId', tempId);
 
             try {
-                const response = await axios.post(
-                    'http://localhost:3000/api/upload',
-                    formData,
-                    {
-                        headers: {
-                            Authorization: token,
-                            'Content-Type': 'multipart/form-data'
-                        }
-                    }
-                );
-
+                const response = await axios.post("http://localhost:3000/api/upload", formData, {
+                    headers: { Authorization: token, 'Content-Type': 'multipart/form-data' }
+                });
                 newMessage = {
                     sender: { _id: currentUserId, name: "You" },
                     content: { type: 'file', ...response.data },
@@ -170,7 +220,7 @@ function Chat({ token, privateKey }) {
                     tempId,
                     timestamp: new Date()
                 };
-
+                console.log("Sending file message:", newMessage);
                 socket.current.emit("chatMessage", {
                     recipient,
                     group: selectedGroup,
@@ -190,6 +240,7 @@ function Chat({ token, privateKey }) {
                 tempId,
                 timestamp: new Date()
             };
+            console.log("Sending text message:", newMessage);
             socket.current.emit("chatMessage", {
                 recipient,
                 group: selectedGroup,
@@ -207,39 +258,63 @@ function Chat({ token, privateKey }) {
     const createGroup = () => {
         const groupName = prompt("Enter group name:");
         if (groupName) {
-            axios.post("http://localhost:3000/api/groups",
-                { name: groupName },
-                { headers: { Authorization: token } }
-            )
-                .then(res => setGroups([...groups, res.data]))
+            axios.post("http://localhost:3000/api/groups", { name: groupName }, { headers: { Authorization: token } })
+                .then(res => setGroups(prev => [...prev, res.data]))
                 .catch(err => console.error("Error creating group:", err));
         }
     };
 
-    // Fetch and show user profile
+    const addMemberToGroup = async (groupId, userId) => {
+        if (!userId || !groupId) return;
+        const canSendMessages = window.confirm(`Allow ${safeRender(users.find(u => u._id === userId)?.name, userId)} to send messages?`);
+        try {
+            const response = await axios.put(
+                `http://localhost:3000/api/groups/${groupId}/members`,
+                { userId, canSendMessages },
+                { headers: { Authorization: token } }
+            );
+            setGroups(prev => prev.map(g => g._id === groupId ? response.data : g));
+        } catch (error) {
+            console.error("Error adding member to group:", error);
+            setNotifications(prev => [...prev, { id: Date.now(), text: "Failed to add member" }]);
+        }
+    };
+
+    const updateGroupPermissions = async (groupId, userId, canSendMessages) => {
+        if (!groupId || !userId) return;
+        try {
+            const response = await axios.put(
+                `http://localhost:3000/api/groups/${groupId}/permissions`,
+                { userId, canSendMessages },
+                { headers: { Authorization: token } }
+            );
+            setGroups(prev => prev.map(g => g._id === groupId ? response.data : g));
+        } catch (error) {
+            console.error("Error updating permissions:", error);
+            setNotifications(prev => [...prev, { id: Date.now(), text: "Failed to update permissions" }]);
+        }
+    };
+
     const showUserProfile = async (userId) => {
         try {
-            const response = await axios.get(`http://localhost:3000/api/users/${userId}`, {
-                headers: { Authorization: token }
-            });
+            const response = await axios.get(`http://localhost:3000/api/users/${userId}`, { headers: { Authorization: token } });
             setSelectedUser(response.data);
         } catch (error) {
             console.error("Error fetching user profile:", error);
         }
     };
 
-    const closeProfile = () => {
-        setSelectedUser(null);
-    };
+    const closeProfile = () => setSelectedUser(null);
 
     const renderMessageContent = (msg) => {
-        if (msg.content && msg.content.type === 'file') {
-            const { name, url, size, mimeType } = msg.content;
-            const isImage = mimeType.startsWith('image/');
+        if (!msg || !msg.content) return <div>[Invalid Message]</div>;
 
+        if (msg.content.type === 'file') {
+            const { name, url, size, mimeType } = msg.content;
+            const isImage = mimeType?.startsWith('image/');
             return (
                 <div style={styles.fileMessage}>
-                    <strong>{msg.sender?.name || "Unknown"}:</strong>
+                    <strong>{safeRender(msg.sender?.name)}:</strong>
                     {isImage ? (
                         <div>
                             <img src={url} alt={name} style={styles.previewImage} />
@@ -257,9 +332,13 @@ function Chat({ token, privateKey }) {
         }
         return (
             <div>
-                <strong>{msg.sender?.name || "Unknown"}:</strong> {msg.content}
+                <strong>{safeRender(msg.sender?.name)}:</strong> {safeRender(msg.content)}
             </div>
         );
+    };
+
+    const toggleEditGroup = (groupId) => {
+        setEditingGroupId(prev => prev === groupId ? null : groupId);
     };
 
     return (
@@ -272,15 +351,17 @@ function Chat({ token, privateKey }) {
                         style={{ ...styles.user, background: recipient === user._id ? "#ddd" : "transparent" }}
                     >
                         <span
-                            onClick={() => { setRecipient(user._id); setSelectedGroup(null); }}
+                            onClick={() => {
+                                console.log("Selecting user:", user._id);
+                                setRecipientWithLog(user._id);
+                                setSelectedGroupWithLog(null);
+                                setEditingGroupId(null);
+                            }}
                             style={{ cursor: "pointer", flex: 1 }}
                         >
-                            {user.name} - {user.status}
+                            {safeRender(user.name)} - {safeRender(user.status)}
                         </span>
-                        <button
-                            onClick={() => showUserProfile(user._id)}
-                            style={styles.profileButton}
-                        >
+                        <button onClick={() => showUserProfile(user._id)} style={styles.profileButton}>
                             Profile
                         </button>
                     </div>
@@ -290,9 +371,74 @@ function Chat({ token, privateKey }) {
                     <div
                         key={grp._id}
                         style={{ ...styles.group, background: selectedGroup === grp._id ? "#ddd" : "transparent" }}
-                        onClick={() => { setSelectedGroup(grp._id); setRecipient(null); }}
                     >
-                        {grp.name}
+                        <div style={styles.groupHeader}>
+                            <span
+                                onClick={() => {
+                                    console.log("Selecting group:", grp._id);
+                                    setSelectedGroupWithLog(grp._id);
+                                    setRecipientWithLog(null);
+                                }}
+                                style={{ cursor: "pointer", flex: 1 }}
+                            >
+                                {safeRender(grp.name)} {isGroupAdmin(grp._id) ? "(Admin)" : ""}
+                            </span>
+                            {isGroupAdmin(grp._id) && (
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        toggleEditGroup(grp._id);
+                                    }}
+                                    style={{
+                                        ...styles.editButton,
+                                        background: editingGroupId === grp._id ? "#dc3545" : "#ffc107"
+                                    }}
+                                >
+                                    {editingGroupId === grp._id ? "Close" : "Edit"}
+                                </button>
+                            )}
+                        </div>
+                        {editingGroupId === grp._id && isGroupAdmin(grp._id) && (
+                            <div style={styles.groupManagement}>
+                                <h4>Members</h4>
+                                {grp.members.map((member, index) => (
+                                    <div key={`${safeRender(member.userId?._id || member.userId)}-${index}`} style={styles.member}>
+                                        <span style={{ marginRight: '10px' }}>
+                                            {safeRender(users.find(u => u._id === safeRender(member.userId?._id || member.userId))?.name, member.userId)}
+                                        </span>
+                                        <label>
+                                            <input
+                                                type="checkbox"
+                                                checked={member.canSendMessages || false}
+                                                onChange={(e) => updateGroupPermissions(grp._id, safeRender(member.userId?._id || member.userId), e.target.checked)}
+                                                disabled={safeRender(member.userId?._id || member.userId) === currentUserId}
+                                            />
+                                            Can Send
+                                        </label>
+                                    </div>
+                                ))}
+                                <h4>Add Member</h4>
+                                <select
+                                    onChange={(e) => {
+                                        if (e.target.value) {
+                                            addMemberToGroup(grp._id, e.target.value);
+                                            e.target.value = "";
+                                        }
+                                    }}
+                                    style={styles.addMemberSelect}
+                                    defaultValue=""
+                                >
+                                    <option value="">Select a user</option>
+                                    {users
+                                        .filter(u => !grp.members.some(m => safeRender(m.userId?._id || m.userId) === u._id))
+                                        .map(user => (
+                                            <option key={user._id} value={user._id}>
+                                                {safeRender(user.name)}
+                                            </option>
+                                        ))}
+                                </select>
+                            </div>
+                        )}
                     </div>
                 ))}
                 <button onClick={createGroup} style={styles.button}>Create Group</button>
@@ -302,15 +448,20 @@ function Chat({ token, privateKey }) {
                     {recipient
                         ? "Private Chat"
                         : selectedGroup
-                            ? `Group: ${groups.find(g => g._id === selectedGroup)?.name || selectedGroup}`
+                            ? `Group: ${safeRender(groups.find(g => g._id === selectedGroup)?.name)}`
                             : "Select a chat"}
                 </h3>
                 <div style={styles.messages}>
-                    {messages.map((msg, i) => (
-                        <div key={msg._id || msg.tempId || i} style={styles.message}>
-                            {renderMessageContent(msg)}
-                        </div>
-                    ))}
+                    {messages
+                        .filter(msg =>
+                            (msg.recipient && (msg.recipient === recipient || msg.recipient === currentUserId || msg.sender._id === currentUserId)) ||
+                            (msg.group && msg.group === selectedGroup)
+                        )
+                        .map((msg, index) => (
+                            <div key={msg._id || msg.tempId || `msg-${index}`} style={styles.message}>
+                                {renderMessageContent(msg)}
+                            </div>
+                        ))}
                 </div>
                 <div style={styles.inputContainer}>
                     <input
@@ -329,8 +480,6 @@ function Chat({ token, privateKey }) {
                     <button onClick={sendMessage} style={styles.button}>Send</button>
                 </div>
             </div>
-
-            {/* Profile Modal */}
             {selectedUser && (
                 <div style={styles.modalOverlay}>
                     <div style={styles.modal}>
@@ -338,19 +487,26 @@ function Chat({ token, privateKey }) {
                         {selectedUser.image && (
                             <img
                                 src={`http://localhost:3000${selectedUser.image}`}
-                                alt={`${selectedUser.name}'s profile`}
+                                alt={`${safeRender(selectedUser.name)}'s profile`}
                                 style={styles.profileImage}
                             />
                         )}
-                        <p><strong>Name:</strong> {selectedUser.name}</p>
-                        <p><strong>Email:</strong> {selectedUser.email}</p>
-                        <p><strong>Location:</strong> {selectedUser.location || 'Not specified'}</p>
-                        <p><strong>Designation:</strong> {selectedUser.designation || 'Not specified'}</p>
-                        <p><strong>Status:</strong> {selectedUser.status}</p>
+                        <p><strong>Name:</strong> {safeRender(selectedUser.name)}</p>
+                        <p><strong>Email:</strong> {safeRender(selectedUser.email)}</p>
+                        <p><strong>Location:</strong> {safeRender(selectedUser.location, "Not specified")}</p>
+                        <p><strong>Designation:</strong> {safeRender(selectedUser.designation, "Not specified")}</p>
+                        <p><strong>Status:</strong> {safeRender(selectedUser.status)}</p>
                         <button onClick={closeProfile} style={styles.closeButton}>Close</button>
                     </div>
                 </div>
             )}
+            {notifications.map((notification) => (
+                <Notification
+                    key={notification.id}
+                    message={notification.text}
+                    onClose={() => setNotifications(prev => prev.filter(n => n.id !== notification.id))}
+                />
+            ))}
         </div>
     );
 }
@@ -364,62 +520,24 @@ const styles = {
     input: { padding: "10px", marginBottom: "10px" },
     fileInput: { padding: "5px" },
     button: { padding: "10px", cursor: "pointer", background: "#007bff", color: "#fff", border: "none" },
-    user: {
-        padding: "10px",
-        cursor: "pointer",
-        borderBottom: "1px solid #ccc",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between"
-    },
-    group: { padding: "10px", cursor: "pointer", borderBottom: "1px solid #ccc" },
+    user: { padding: "10px", cursor: "pointer", borderBottom: "1px solid #ccc", display: "flex", alignItems: "center", justifyContent: "space-between" },
+    group: { padding: "10px", borderBottom: "1px solid #ccc" },
+    groupHeader: { display: "flex", alignItems: "center", justifyContent: "space-between" },
+    editButton: { padding: "5px 10px", color: "#000", border: "none", cursor: "pointer", borderRadius: "3px" },
+    groupManagement: { padding: "5px", background: "#f9f9f9", marginTop: "5px" },
+    member: { display: "flex", alignItems: "center", gap: "10px", marginBottom: "5px" },
+    addMemberSelect: { padding: "5px", width: "100%", marginBottom: "10px" },
     message: { padding: "5px", borderBottom: "1px solid #eee" },
     fileMessage: { margin: "5px 0" },
     fileLink: { color: "#007bff", textDecoration: "none", display: "block", marginTop: "5px" },
     previewImage: { maxWidth: "200px", maxHeight: "200px", marginTop: "5px" },
-    profileButton: {
-        padding: "5px 10px",
-        background: "#28a745",
-        color: "#fff",
-        border: "none",
-        cursor: "pointer",
-        borderRadius: "3px"
-    },
-    modalOverlay: {
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
-        background: "rgba(0,0,0,0.5)",
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "center"
-    },
-    modal: {
-        background: "#fff",
-        padding: "20px",
-        borderRadius: "5px",
-        width: "300px",
-        boxShadow: "0 2px 10px rgba(0,0,0,0.1)"
-    },
-    closeButton: {
-        padding: "10px",
-        background: "#dc3545",
-        color: "#fff",
-        border: "none",
-        cursor: "pointer",
-        width: "100%",
-        marginTop: "10px",
-        borderRadius: "3px"
-    },
-    profileImage: {
-        width: "100px",
-        height: "100px",
-        borderRadius: "50%",
-        marginBottom: "10px",
-        objectFit: "cover"
-    }
+    profileButton: { padding: "5px 10px", background: "#28a745", color: "#fff", border: "none", cursor: "pointer", borderRadius: "3px" },
+    modalOverlay: { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.5)", display: "flex", justifyContent: "center", alignItems: "center" },
+    modal: { background: "#fff", padding: "20px", borderRadius: "5px", width: "300px", boxShadow: "0 2px 10px rgba(0,0,0,0.1)" },
+    closeButton: { padding: "10px", background: "#dc3545", color: "#fff", border: "none", cursor: "pointer", width: "100%", marginTop: "10px", borderRadius: "3px" },
+    profileImage: { width: "100px", height: "100px", borderRadius: "50%", marginBottom: "10px", objectFit: "cover" },
+    notification: { position: 'fixed', top: '20px', right: '20px', background: '#fff', padding: '15px', borderRadius: '5px', boxShadow: '0 2px 5px rgba(0,0,0,0.2)', marginBottom: '10px', zIndex: 1000 },
+    notificationClose: { marginTop: '5px', padding: '5px 10px', background: '#ff4444', color: '#fff', border: 'none', borderRadius: '3px', cursor: 'pointer' }
 };
 
 export default Chat;
